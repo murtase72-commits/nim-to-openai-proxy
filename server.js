@@ -77,7 +77,7 @@ const MODEL_MAPPING = {
   'gemini-turbo': 'nvidia/llama3-chatqa-1.5-70b',
   'gpt-3.5o': 'nvidia/nemotron-3.5-lightning-30b-a3b',
   'gpt-4-flash': 'deepseek-ai/deepseek-v4.1-flash',
-  'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813', // will be replaced by 4.1 pro when it releases, currently doesn't work
+  'gpt-4o': 'z-ai/glm-5.3', // will be replaced by 4.1 pro when it releases, currently doesn't work
   'mistral': 'mistralai/mistral-large-2-instruct', 
   'mistral-turbo': 'nv-mistralai/mistral-nemo-12b-instruct',
   'mistral-pro': 'mistralai/mistral-7b-instruct-v0.3', 
