@@ -25,7 +25,14 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 // Verbose logging: reasoning payload per fallback attempt, full request/error bodies on failure.
 const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
 
-const MAX_TOKENS_LIMIT = 65536;
+// Output token handling:
+//   MAX_TOKENS_LIMIT  - hard ceiling, no request can exceed this.
+//   DEFAULT_MAX_TOKENS - used when the client doesn't send max_tokens at all.
+//   MIN_MAX_TOKENS    - floor; raises low client values (e.g. a small "Max new tokens"
+//                       slider) so replies and reasoning aren't cut off. 0 = disabled.
+const MAX_TOKENS_LIMIT = Number(process.env.MAX_TOKENS_LIMIT) || 65536;
+const DEFAULT_MAX_TOKENS = Number(process.env.DEFAULT_MAX_TOKENS) || 8192;
+const MIN_MAX_TOKENS = Number(process.env.MIN_MAX_TOKENS) || 0;
 
 // Shared keep-alive agent for connection reuse on long-lived deployments.
 const keepAliveAgent = new https.Agent({
@@ -77,7 +84,7 @@ const MODEL_MAPPING = {
   'gemini-turbo': 'nvidia/llama3-chatqa-1.5-70b',
   'gpt-3.5o': 'nvidia/nemotron-3.5-lightning-30b-a3b',
   'gpt-4-flash': 'deepseek-ai/deepseek-v4.1-flash',
-  'gpt-4o': 'z-ai/glm-5.3', // will be replaced by 4.1 pro when it releases, currently doesn't work
+  'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813', // will be replaced by 4.1 pro when it releases, currently doesn't work
   'mistral': 'mistralai/mistral-large-2-instruct', 
   'mistral-turbo': 'nv-mistralai/mistral-nemo-12b-instruct',
   'mistral-pro': 'mistralai/mistral-7b-instruct-v0.3', 
@@ -464,7 +471,8 @@ app.post('/v1/chat/completions', async (req, res) => {
     const baseRequest = {
       ...forwardedFields,
       temperature: temperature ?? 0.7,
-      max_tokens: Math.min(max_tokens ?? 2048, MAX_TOKENS_LIMIT),
+      // Use the client's value (or the default), raise it to the floor, then cap at the ceiling.
+      max_tokens: Math.min(Math.max(max_tokens ?? DEFAULT_MAX_TOKENS, MIN_MAX_TOKENS), MAX_TOKENS_LIMIT),
       stream: stream || false
     };
 
@@ -792,7 +800,7 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`[PROXY] Hybrid proxy running on port ${PORT}`);
-  console.log(`[PROXY] Max tokens limit: ${MAX_TOKENS_LIMIT}`);
+  console.log(`[PROXY] Max tokens: default ${DEFAULT_MAX_TOKENS}, floor ${MIN_MAX_TOKENS}, limit ${MAX_TOKENS_LIMIT}`);
   validateModels().catch(err => {
     console.error('[VALIDATION] Startup check failed:', err.message);
   });
