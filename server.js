@@ -22,7 +22,7 @@ const ENABLE_THINKING_MODE = process.env.ENABLE_THINKING_MODE === 'true';
 const SKIP_VALIDATION = process.env.SKIP_VALIDATION === 'true';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
-// Verbose logging: reasoning payload per fallback attempt, full request/error bodies on failure.
+// Verbose logging: reasoning payload per request, full request/error bodies on failure.
 const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
 
 // Output token handling:
@@ -46,16 +46,30 @@ const nim = axios.create({
   httpsAgent: keepAliveAgent
 });
 
-// Per-attempt timeout before falling back to the next model. Reasoning
-// models get a longer window since thinking delays first-token latency.
-// Check these against your platform's own request duration limit.
+// Request timeout. Reasoning models get a longer window since thinking
+// delays first-token latency. Check these against your platform's own
+// request duration limit.
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS) || 180000;
 const REASONING_REQUEST_TIMEOUT_MS = Number(process.env.REASONING_REQUEST_TIMEOUT_MS) || 480000;
 const VALIDATION_TIMEOUT_MS = 15000;
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 
+// Backend models that always run with reasoning on, even when
+// ENABLE_THINKING_MODE is off. The payload itself is built by reasoning.js.
+const ALWAYS_REASONING_MODELS = new Set([
+  'z-ai/glm-5.3-flash',
+  'z-ai/glm-5-3-flash'
+]);
+
+function isThinkingEnabledFor(model) {
+  return ENABLE_THINKING_MODE || ALWAYS_REASONING_MODELS.has(model);
+}
+
 if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
-if (DEBUG_MODE) console.log('[CONFIG] Debug mode: ENABLED (verbose reasoning + fallback logging)');
+if (ALWAYS_REASONING_MODELS.size > 0) {
+  console.log(`[CONFIG] Reasoning always on for: ${[...ALWAYS_REASONING_MODELS].join(', ')}`);
+}
+if (DEBUG_MODE) console.log('[CONFIG] Debug mode: ENABLED (verbose reasoning logging)');
 
 // ─── Config validation ──────────────────────────────────────────────────
 
@@ -262,87 +276,49 @@ function safeWrite(res, data) {
   return false;
 }
 
-// ─── Helper: Fallback Chain ──────────────────────────────────────────────
+// ─── Helper: Upstream Call ───────────────────────────────────────────────
 
-// Per-model cooldown after a 403/429, in-memory (resets on restart, not shared across instances).
-const modelCooldowns = new Map(); // model -> timestamp (ms) until which to skip it
-
-const RATE_LIMIT_COOLDOWN_MS = Number(process.env.RATE_LIMIT_COOLDOWN_MS) || 30000;
-const ACCESS_DENIED_COOLDOWN_MS = Number(process.env.ACCESS_DENIED_COOLDOWN_MS) || 300000;
-
-function isInCooldown(model) {
-  const until = modelCooldowns.get(model);
-  return typeof until === 'number' && Date.now() < until;
-}
-
-function setCooldown(model, ms) {
-  modelCooldowns.set(model, Date.now() + ms);
-}
-
-async function callWithFallback(baseRequest, models, enableThinking, clientReasoningEffort, hasTools) {
-  let lastError = null;
+// Single-model call, no fallback: whatever NIM answers (or whatever error it
+// throws) goes straight back to the client.
+async function callModel(baseRequest, model, clientReasoningEffort, hasTools) {
+  const enableThinking = isThinkingEnabledFor(model);
   const timeoutMs = resolveEffectiveThinking(enableThinking, clientReasoningEffort)
     ? REASONING_REQUEST_TIMEOUT_MS
     : REQUEST_TIMEOUT_MS;
 
-  // Skip cooling-down models; fall back to the full list if that empties the chain.
-  const activeModels = models.filter(m => !isInCooldown(m));
-  const attemptOrder = activeModels.length > 0 ? activeModels : models;
+  const reasoningPayload = getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTools);
+  const fullRequest = { ...baseRequest, model, ...reasoningPayload };
 
-  for (const model of attemptOrder) {
-    const reasoningPayload = getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTools);
-    const fullRequest = { ...baseRequest, model, ...reasoningPayload };
-
-    if (DEBUG_MODE) {
-      console.log(`[DEBUG] Attempting ${model} with reasoning payload:`, JSON.stringify(reasoningPayload), `(timeout: ${timeoutMs}ms)`);
-    }
-
-    try {
-      const res = await nim.post(
-        '/chat/completions',
-        fullRequest,
-        {
-          headers: {
-            Authorization: `Bearer ${NIM_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          responseType: baseRequest.stream ? 'stream' : 'json',
-          timeout: timeoutMs
-        }
-      );
-      return { response: res, model };
-    } catch (err) {
-      lastError = err;
-      const status = err.response?.status;
-
-      console.warn(
-        `[FALLBACK] Model failed: ${model}`,
-        status,
-        err.response?.data?.error?.message || err.message
-      );
-      if (DEBUG_MODE) {
-        console.log(`[DEBUG] Full request body sent to ${model}:`, JSON.stringify(fullRequest));
-        console.log(`[DEBUG] Full upstream error response:`, JSON.stringify(err.response?.data || null));
-      }
-
-      // Same key for every attempt: a 401 means every remaining model would fail identically.
-      if (status === 401) {
-        throw err;
-      }
-
-      // 403: likely an access-tier issue, not a dead key — cooldown just this model.
-      if (status === 403) {
-        setCooldown(model, ACCESS_DENIED_COOLDOWN_MS);
-      }
-
-      // 429: rate limited — short cooldown.
-      if (status === 429) {
-        setCooldown(model, RATE_LIMIT_COOLDOWN_MS);
-      }
-    }
+  if (DEBUG_MODE) {
+    console.log(`[DEBUG] Calling ${model} with reasoning payload:`, JSON.stringify(reasoningPayload), `(timeout: ${timeoutMs}ms)`);
   }
 
-  throw lastError || new Error('All models failed');
+  try {
+    const res = await nim.post(
+      '/chat/completions',
+      fullRequest,
+      {
+        headers: {
+          Authorization: `Bearer ${NIM_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        responseType: baseRequest.stream ? 'stream' : 'json',
+        timeout: timeoutMs
+      }
+    );
+    return { response: res, model };
+  } catch (err) {
+    console.warn(
+      `[PROXY] Model failed: ${model}`,
+      err.response?.status,
+      err.response?.data?.error?.message || err.message
+    );
+    if (DEBUG_MODE) {
+      console.log(`[DEBUG] Full request body sent to ${model}:`, JSON.stringify(fullRequest));
+      console.log(`[DEBUG] Full upstream error response:`, JSON.stringify(err.response?.data || null));
+    }
+    throw err;
+  }
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────
@@ -381,7 +357,7 @@ app.get('/', (req, res) => {
       <path d="M7 12.5l3 3 6-6.5" stroke="#7ee787" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
     </svg>
     <h1>it's up.</h1>
-    <p>this proxies OpenAI-format chat requests to NVIDIA NIM. point any OpenAI-compatible client at it, pick a model with a plain alias (<code>gpt-4</code>, <code>mistral</code>, etc), and it handles model fallback, streaming, and each backend's own reasoning/thinking quirks for you.</p>
+    <p>this proxies OpenAI-format chat requests to NVIDIA NIM. point any OpenAI-compatible client at it, pick a model with a plain alias (<code>gpt-4</code>, <code>mistral</code>, etc), and it handles streaming and each backend's own reasoning/thinking quirks for you.</p>
     <p>it's an API, not a website: nothing lives at this root path.</p>
     <p>send requests to <code>/v1/chat/completions</code> with an <code>Authorization: Bearer &lt;token&gt;</code> header.</p>
     <p>status check, no token needed: <code>/health</code></p>
@@ -447,16 +423,20 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, max_tokens, temperature, stream, reasoning_effort } = req.body;
 
-    let primaryModel = MODEL_MAPPING[model];
-    if (!primaryModel) {
-      console.warn(`[PROXY] Unknown model alias "${model}", falling back to default: ${DEFAULT_MODEL}`);
-      primaryModel = DEFAULT_MODEL;
+    // One alias -> one backend model. No fallback chain.
+    const backendModel = MODEL_MAPPING[model];
+    if (!backendModel) {
+      console.warn(`[PROXY] Unknown model alias "${model}"`);
+      return res.status(400).json({
+        error: {
+          message: `Unknown model "${model}". See GET /v1/models for available aliases.`,
+          type: 'invalid_request_error',
+          code: 400
+        }
+      });
     }
 
-    // De-dupe: avoids retrying the same model twice if it's also in FALLBACK_MODELS.
-    const modelChain = [...new Set([primaryModel, ...FALLBACK_MODELS])];
-
-    // Forward all client fields except model (replaced per-attempt) and
+    // Forward all client fields except model (replaced with the backend ID) and
     // reasoning_effort (translated per-model by getReasoningPayload).
     const { model: _droppedModel, reasoning_effort: _droppedReasoningEffort, ...forwardedFields } = req.body;
 
@@ -468,10 +448,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
 
-    const { response, model: usedModel } = await callWithFallback(
+    const { response, model: usedModel } = await callModel(
       baseRequest,
-      modelChain,
-      ENABLE_THINKING_MODE,
+      backendModel,
       reasoning_effort,
       !!req.body.tools
     );
@@ -694,7 +673,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
-        model: usedModel, // actual model that answered, may differ from the requested alias
+        model: usedModel,
         created: Math.floor(Date.now() / 1000),
         choices: (response.data.choices || []).map((choice, i) => {
           const normalizedChoice = normalizeNonStreamChoice(choice, usedModel);
