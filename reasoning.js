@@ -158,7 +158,7 @@ const REASONING_EFFORT_ENUMS = {
   'deepseek-ai/deepseek-v4-flash-0731': ['low', 'high', 'max'],
   'deepseek-ai/deepseek-v4-pro-0813': ['low', 'high', 'max'],
   'nvidia/nemotron-3-super-120b-a12b': ['low'],
-  'nvidia/nemotron-3-ultra-550b-a55b': ['low'],
+  'z-ai/glm-5-3-flash': ['high'],
   'minimaxai/minimax-m3': ['adaptive'],
   'moonshotai/kimi-k3': ['low', 'high', 'max'],
   'meta/muse-glimmer-30b': ['none', 'minimal', 'low', 'medium', 'high', 'max']
