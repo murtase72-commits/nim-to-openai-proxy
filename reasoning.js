@@ -160,7 +160,7 @@ const REASONING_EFFORT_ENUMS = {
   'nvidia/nemotron-3-super-120b-a12b': ['low'],
   'nvidia/nemotron-3-ultra-550b-a55b': ['low'],
   'minimaxai/minimax-m3': ['adaptive'],
-  'moonshotai/kimi-k3': ['low', 'high', 'max'],
+  'z-ai/glm-5-3-flash': ['low', 'high', 'max'],
   'meta/muse-glimmer-30b': ['none', 'minimal', 'low', 'medium', 'high', 'max']
 };
 
